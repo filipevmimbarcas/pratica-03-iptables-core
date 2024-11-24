@@ -2,8 +2,11 @@
 # Firewall da empresa 1
 # NAT - rede interna para a interface externa
 # eth1 - interface externa (WAN)
+WAN='200.16.1.1'
 # eth0 - interface interna (LAN)
+LAN='172.16.0.0/24'
 # eth2 - interface DMZ
+DMZ='200.16.2.0/24'
 # Ativa o roteamento
 echo 1 > /proc/sys/net/ipv4/ip_forward
 #### Ativa Modulos
@@ -23,11 +26,11 @@ echo 1 > /proc/sys/net/ipv4/ip_forward
         iptables -P INPUT  DROP -t filter
         iptables -P OUTPUT ACCEPT -t filter
         iptables -P FORWARD DROP -t filter
-                # para manter as conexoes existentes com o proprio firewall (entrada)
+		# para manter as conexoes existentes com o proprio firewall (entrada)
         iptables -A INPUT -m state --state RELATED,ESTABLISHED -j ACCEPT
         # para manter as conexoes existentes com o proprio firewall (saida)
         iptables -A OUTPUT -m state --state RELATED,ESTABLISHED -j ACCEPT
-                # para manter as conexoes passando pelo firewall
+		# para manter as conexoes passando pelo firewall
         iptables -A FORWARD -m state --state RELATED,ESTABLISHED -j ACCEPT
 
 
@@ -40,14 +43,71 @@ iptables -A INPUT -i eth1 -p tcp  -s 0/0 --dport 22 -j ACCEPT
 iptables -A INPUT -i eth0 -p tcp  -s 0/0 --dport 22 -j ACCEPT
 iptables -A INPUT -i eth2 -p tcp  -s 0/0 --dport 22 -j ACCEPT
 # Libera a resolucao de DNS no servidor local  (LAN e DMZ)
-iptables -A INPUT -i eth0 -p udp -s 192.168.0.0/24 -d 0/0 --dport 53 -m state --state NEW,ESTABLISHED,RELATED -j ACCEPT
-iptables -A INPUT -i eth2 -p udp -s 200.10.5.0/24 -d 0/0 --dport 53 -m state --state NEW,ESTABLISHED,RELATED -j ACCEPT
-# Mantem o estado das conexoes da interface de loopback 
+iptables -A INPUT -i eth0 -p udp -s $LAN -d 0/0 --dport 53 -m state --state NEW,ESTABLISHED,RELATED -j ACCEPT
+iptables -A INPUT -i eth2 -p udp -s $DMZ -d 0/0 --dport 53 -m state --state NEW,ESTABLISHED,RELATED -j ACCEPT
+# Mantem o estado das conexoes da interface de loopback
 iptables -A INPUT  -s 127.0.0.1  -m state --state RELATED,ESTABLISHED -j ACCEPT
 iptables -A OUTPUT  -s 127.0.0.1  -m state --state RELATED,ESTABLISHED -j ACCEPT
 # Libera todos os acesso originados de localhost para localhost
 iptables -A INPUT -s 127.0.0.1 -d 127.0.0.1  -j ACCEPT
 # Ativa mascaramento (rede interna para o IP da WAN) (IP Fixo)
-iptables -t nat -A POSTROUTING -o eth1 -j SNAT -s 192.168.0.0/24 --to-source 200.10.4.2
-"rc_empresa1.txt" 87L, 4358C                                                                                                                                                1,1           Top
+#iptables -t nat -A POSTROUTING -o eth1 -j SNAT -s $LAN --to-source $WAN
 
+# Ativa mascaramento (Rede interna para Wan)
+iptables -t nat -A POSTROUTING -o eth1 -j MASQUERADE
+
+
+### Liberacoes (rede interna (LAN) para fora)
+# Servicos comuns
+iptables -A FORWARD -i eth0 -p tcp -m multiport -s $LAN -d 0/0 --dports 22,80,443,5001 -j ACCEPT
+# Servico porta 3000
+ iptables -A FORWARD -p tcp -s $LAN --dport 3000 -j ACCEPT
+
+# ICMP
+iptables -A FORWARD -i eth0 -p icmp -s $LAN -d 0/0 -j ACCEPT
+# DNS, NTP
+iptables -A FORWARD -i eth0 -p udp -s $LAN -d 0/0 -m multiport --dports 53,143 -m state --state NEW,ESTABLISHED,RELATED -j ACCEPT
+
+
+# Redireciona portas (porta publica: 5001, IP interno: 192.168.0.10, Porta interna: 5001)
+#iptables -A FORWARD -i eth1 -d 192.168.0.10/32 -j ACCEPT
+#iptables -A PREROUTING -t nat -p tcp -d 200.10.4.2 --dport 5001 -j DNAT --to 192.168.0.10:5001
+
+# Redirecionamentos hos 172.16.0.11
+iptables -A PREROUTING -t eth1 -d 172.16.0.11/32 -j ACCEPT
+iptables -A PREROUTING -t nat -p tcp -d $WAN --port 80 -j DNAT --to 172.16.0.11:80
+iptables -A PREROUTING -t nat -p tcp -d $WAN --port 3306 -j DNAT --to 172.16.0.11:3306
+iptables -A PREROUTING -t nat -p tcp -d $WAN --port 5900 -j DNAT --to 172.16.0.11:5900
+iptables -A PREROUTING -t nat -p tcp -d $WAN --port 5432 -j DNAT --to 172.16.0.11:5432
+
+
+# NAT 1:1
+iptables -t nat -A PREROUTING -d $WAN -j DNAT --to-destination 172.16.0.12/32
+iptables -t nat -A POSTROUTING -s 172.16.0.12/12 -j SNAT --to-source $WAN
+
+
+### Liberacoes (rede DMZ para fora)
+# Servicos comuns
+iptables -A FORWARD -i eth2 -p tcp -m multiport -s $DMZ -d 0/0 --dports 22,80,443,5001 -j ACCEPT
+# ICMP
+iptables -A FORWARD -i eth2 -p icmp -s $DMZ -d 0/0 -j ACCEPT
+# DNS, NTP
+iptables -A FORWARD -i eth0 -p udp -s $DMZ -d 0/0 -m multiport --dports 53,143 -m state --state NEW,ESTABLISHED,RELATED -j ACCEPT
+
+
+
+### Liberacoes (rede externa para a DMZ)
+# Host externo 200.10.0.10, bloqueado o acesso a porta 22 no servidor 200.10.5.10
+#iptables -A FORWARD -i eth1 -p tcp -s 200.10.0.10/32 -d 200.10.5.10/32 --dport 22 -j DROP
+# Servicos comuns, somente para o servidor 200.10.5.10
+#iptables -A FORWARD -i eth1 -p tcp -m multiport -s 0/0 -d 200.10.5.10/32 --dports 22,80,443,5001 -j ACCEPT
+# SSH e HTTP, somente para o servidor 200.10.5.11
+#iptables -A FORWARD -i eth1 -p tcp -m multiport -s 0/0 -d 200.10.5.11/32 --dports 22,80 -j ACCEPT
+# ICMP
+#iptables -A FORWARD -i eth1 -p icmp -s 200.10.5.0/24 -d 0/0 -j ACCEPT
+# Host externo 200.10.0.10, acesso a porta 5001 no servidor 200.10.5.11
+#iptables -A FORWARD -i eth1 -p tcp -s 200.10.0.10/32 -d 200.10.5.11/32 --dport 5001 -j ACCEPT
+
+# Libera OSPF
+iptables -A INPUT -p ospf -j ACCEPT
+iptables -A OUTPUT -p ospf -j ACCEPT
